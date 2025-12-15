@@ -1,12 +1,15 @@
 use std::{error::Error, fs::File, path::Path};
 
-use csv::{Reader, ReaderBuilder};
+use csv::{Reader, ReaderBuilder, Trim};
 use tokio::sync::mpsc::Sender;
 
 use crate::transaction::TransactionEvent;
 
 pub fn reader<P: AsRef<Path>>(path: P) -> Result<Reader<File>, Box<dyn Error>> {
-    Ok(ReaderBuilder::new().has_headers(true).from_path(path)?)
+    Ok(ReaderBuilder::new()
+        .has_headers(true)
+        .trim(Trim::All)
+        .from_path(path)?)
 }
 
 pub struct TransactionRouter<'a> {
@@ -20,7 +23,10 @@ impl<'a> TransactionRouter<'a> {
     }
     pub async fn route_tx(&self, event: TransactionEvent) {
         let shard_id = (event.client as usize) % self.shards.len();
-        let _ = self.shards[shard_id].send(event).await.inspect_err(|err| eprintln!("{err}"));
+        let _ = self.shards[shard_id]
+            .send(event)
+            .await
+            .inspect_err(|err| eprintln!("{err}"));
     }
 
     pub async fn run(self) -> Result<(), Box<dyn Error>> {
