@@ -1,44 +1,57 @@
-use crate::{account::Account, error::TransactionError};
+use crate::{
+    account::Account,
+    error::{AccountError, TxEventError},
+};
+use serde::Deserialize;
 
+#[derive(Deserialize, Debug, Copy, Clone)]
+#[serde(rename_all = "lowercase")]
 pub enum TransactionEventType {
     Deposit,
     Withdrawal,
-    Dispute,
     Resolve,
     Chargeback,
+    Dispute,
 }
 
+#[derive(Deserialize, Clone, Debug)]
 pub struct TransactionEvent {
-    id: u32,
-    r#type: TransactionEventType,
-    client: u16,
-    amount: Option<f64>,
+    #[serde(rename = "tx")]
+    pub id: u32,
+    pub r#type: TransactionEventType,
+    pub client: u16,
+    pub amount: Option<f64>,
 }
 
-trait Transactable {
-    fn apply(&self, account: &mut Account) -> Result<(), TransactionError>;
+pub trait Transactable: Send {
+    fn apply(&self, account: &mut Account) -> Result<(), AccountError>;
+    fn client(&self) -> u16;
 }
 
-struct Deposit {}
-struct Withdrawal {}
-struct Dispute {
-    id: u32,
-}
-struct Resolve {
-    id: u32,
-}
-struct Chargeback {
-    id: u32,
+#[derive(Copy, Clone, Debug)]
+pub struct Deposit {}
+#[derive(Copy, Clone, Debug)]
+pub struct Withdrawal {}
+#[derive(Copy, Clone, Debug)]
+pub struct Dispute {}
+#[derive(Copy, Clone, Debug)]
+pub struct Resolve {}
+#[derive(Copy, Clone, Debug)]
+pub struct Chargeback {}
+
+#[derive(Clone, Debug)]
+pub struct TransactionState<T: Clone> {
+    pub tx_event: TransactionEvent,
+    pub transaction: T,
 }
 
-pub struct TransactionState<T> {
-    tx_event: TransactionEvent,
-    transaction: T,
-}
-
-impl<T: Transactable> Transactable for TransactionState<T> {
-    fn apply(&self, account: &mut Account) -> Result<(), TransactionError> {
+impl<T: Transactable + Send + Clone> Transactable for TransactionState<T> {
+    fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
         self.transaction.apply(account)
+    }
+
+    fn client(&self) -> u16 {
+        self.tx_event.client
     }
 }
 
@@ -49,12 +62,14 @@ impl TransactionState<Deposit> {
             transaction: Deposit {},
         }
     }
+}
 
-    pub fn dispute(self, id: u32) -> TransactionState<Dispute> {
-        TransactionState {
-            tx_event: self.tx_event,
-            transaction: Dispute { id },
-        }
+impl Transactable for TransactionState<Deposit> {
+    fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
+        account.deposit(self)
+    }
+    fn client(&self) -> u16 {
+        self.tx_event.client
     }
 }
 
@@ -67,18 +82,67 @@ impl TransactionState<Withdrawal> {
     }
 }
 
+impl Transactable for TransactionState<Withdrawal> {
+    fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
+        account.debit(self)
+    }
+    fn client(&self) -> u16 {
+        self.tx_event.client
+    }
+}
+
 impl TransactionState<Dispute> {
-    pub fn resolve(self, id: u32) -> TransactionState<Resolve> {
+    pub fn new(tx_event: TransactionEvent) -> Result<Self, TxEventError> {
+        if let TransactionEventType::Deposit = tx_event.r#type {
+            Ok(TransactionState {
+                tx_event,
+                transaction: Dispute {},
+            })
+        } else {
+            Err(TxEventError::UnexpectedTxType {
+                expected: TransactionEventType::Dispute,
+                actual: tx_event.r#type,
+            })
+        }
+    }
+    pub fn resolve(self) -> TransactionState<Resolve> {
         TransactionState {
             tx_event: self.tx_event,
-            transaction: Resolve { id },
+            transaction: Resolve {},
         }
     }
 
-    pub fn chargeback(self, id: u32) -> TransactionState<Chargeback> {
+    pub fn chargeback(self) -> TransactionState<Chargeback> {
         TransactionState {
             tx_event: self.tx_event,
-            transaction: Chargeback { id },
+            transaction: Chargeback {},
         }
+    }
+}
+
+impl Transactable for TransactionState<Dispute> {
+    fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
+        account.hold(self)
+    }
+    fn client(&self) -> u16 {
+        self.tx_event.client
+    }
+}
+
+impl Transactable for TransactionState<Resolve> {
+    fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
+        account.free(self)
+    }
+    fn client(&self) -> u16 {
+        self.tx_event.client
+    }
+}
+
+impl Transactable for TransactionState<Chargeback> {
+    fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
+        account.chargeback(self)
+    }
+    fn client(&self) -> u16 {
+        self.tx_event.client
     }
 }
