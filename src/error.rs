@@ -38,10 +38,7 @@ impl Display for AccountError {
                 )
             }
             AccountError::AccountFrozen { id, tx } => {
-                write!(
-                    f,
-                    "AccountFrozen: '{id}', tx: '{tx}', expected tx amount"
-                )
+                write!(f, "AccountFrozen: '{id}', tx: '{tx}', expected tx amount")
             }
         }
     }
@@ -49,16 +46,15 @@ impl Display for AccountError {
 
 #[derive(Debug)]
 pub enum TxEventError {
-    UnexpectedTxType {
-        actual: TransactionEventType,
-        expected: TransactionEventType,
-    },
+    UnexpectedTxType { actual: TransactionEventType },
+    NotDisputable,
 }
 
 impl Error for TxEventError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             TxEventError::UnexpectedTxType { .. } => None,
+            TxEventError::NotDisputable => None,
         }
     }
 }
@@ -66,10 +62,15 @@ impl Error for TxEventError {
 impl Display for TxEventError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TxEventError::UnexpectedTxType { actual, expected } => write!(
+            TxEventError::UnexpectedTxType { actual } => write!(
                 f,
-                "UnexpectedTxType: expected: '{expected:?}', actual: '{actual:?}'"
+                "UnexpectedTxType: expected: '{:?}|{:?}', actual: '{actual:?}'",
+                TransactionEventType::Deposit,
+                TransactionEventType::Withdrawal,
             ),
+            TxEventError::NotDisputable => {
+                write!(f, "NotDisputable: cannot dispute transaction type")
+            }
         }
     }
 }
