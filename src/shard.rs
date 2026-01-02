@@ -3,10 +3,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::{
     router::{self},
-    transaction::{
-        Deposit, Dispute, Transactable, TransactionEvent, TransactionEventType, TransactionState,
-        Withdrawal,
-    },
+    transaction::{Transactable, TransactionEvent, TransactionEventType},
 };
 
 pub struct TransactionShard<'a> {
@@ -33,13 +30,10 @@ impl<'a> TransactionShard<'a> {
             let mut pending = HashMap::new();
             while let Some(tx_event) = self.rx.recv().await {
                 match tx_event.r#type {
-                    TransactionEventType::Deposit => {
-                        let tx = Box::new(TransactionState::<Deposit>::new(tx_event));
-                        self.account_tx.send(tx).await.unwrap()
-                    }
-                    TransactionEventType::Withdrawal => {
-                        let tx = Box::new(TransactionState::<Withdrawal>::new(tx_event));
-                        let _ = self.account_tx.send(tx).await;
+                    TransactionEventType::Deposit | TransactionEventType::Withdrawal => {
+                        if let Ok(tx) = Box::<dyn Transactable>::try_from(tx_event) {
+                            self.account_tx.send(tx).await.unwrap();
+                        }
                     }
                     TransactionEventType::Dispute => {
                         let tx_id = tx_event.id;
@@ -50,10 +44,10 @@ impl<'a> TransactionShard<'a> {
                         for result in reader.deserialize() {
                             let event_record: TransactionEvent = result.unwrap();
                             if event_record.id == tx_id {
-                                let dispute = TransactionState::<Dispute>::new(event_record);
-                                if let Ok(dispute_tx) = dispute {
-                                    let tx = Box::new(dispute_tx);
-                                    pending.insert(tx.tx_event.id, tx.clone());
+                                if let Ok(tx) = Box::<dyn Transactable>::try_from(event_record)
+                                    && let Ok(tx) = tx.try_dispute()
+                                {
+                                    pending.insert(tx.id(), tx.cloned());
                                     self.account_tx.send(tx).await.unwrap();
                                 }
                                 break;
@@ -63,13 +57,13 @@ impl<'a> TransactionShard<'a> {
                     TransactionEventType::Resolve => {
                         if let Some(tx) = pending.remove(&tx_event.id) {
                             let tx = tx.resolve();
-                            self.account_tx.send(Box::new(tx)).await.unwrap();
+                            self.account_tx.send(tx).await.unwrap();
                         }
                     }
                     TransactionEventType::Chargeback => {
                         if let Some(tx) = pending.remove(&tx_event.id) {
                             let tx = tx.chargeback();
-                            self.account_tx.send(Box::new(tx)).await.unwrap();
+                            self.account_tx.send(tx).await.unwrap();
                         }
                     }
                 }
