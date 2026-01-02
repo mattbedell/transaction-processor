@@ -23,9 +23,40 @@ pub struct TransactionEvent {
     pub amount: Option<f64>,
 }
 
+impl TryFrom<TransactionEvent> for Box<dyn Transactable> {
+    type Error = TxEventError;
+    fn try_from(tx_event: TransactionEvent) -> Result<Self, Self::Error> {
+        match tx_event.r#type {
+            TransactionEventType::Deposit => Ok(Box::new(TransactionState {
+                tx_event,
+                transaction: Deposit {},
+            })),
+            TransactionEventType::Withdrawal => Ok(Box::new(TransactionState {
+                tx_event,
+                transaction: Withdrawal {},
+            })),
+            TransactionEventType::Dispute
+            | TransactionEventType::Resolve
+            | TransactionEventType::Chargeback => Err(TxEventError::UnexpectedTxType {
+                actual: tx_event.r#type,
+            }),
+        }
+    }
+}
+
+pub trait Disputable: Transactable {
+    fn resolve(self: Box<Self>) -> Box<dyn Transactable>;
+    fn chargeback(self: Box<Self>) -> Box<dyn Transactable>;
+    fn cloned(&self) -> Box<dyn Disputable>;
+}
+
 pub trait Transactable: Send {
     fn apply(&self, account: &mut Account) -> Result<(), AccountError>;
     fn client(&self) -> u16;
+    fn try_dispute(self: Box<Self>) -> Result<Box<dyn Disputable>, TxEventError> {
+        Err(TxEventError::NotDisputable)
+    }
+    fn id(&self) -> u32;
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -45,25 +76,6 @@ pub struct TransactionState<T: Clone> {
     pub transaction: T,
 }
 
-impl<T: Transactable + Send + Clone> Transactable for TransactionState<T> {
-    fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
-        self.transaction.apply(account)
-    }
-
-    fn client(&self) -> u16 {
-        self.tx_event.client
-    }
-}
-
-impl TransactionState<Deposit> {
-    pub fn new(tx_event: TransactionEvent) -> Self {
-        TransactionState {
-            tx_event,
-            transaction: Deposit {},
-        }
-    }
-}
-
 impl Transactable for TransactionState<Deposit> {
     fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
         account.deposit(self)
@@ -71,14 +83,16 @@ impl Transactable for TransactionState<Deposit> {
     fn client(&self) -> u16 {
         self.tx_event.client
     }
-}
 
-impl TransactionState<Withdrawal> {
-    pub fn new(tx_event: TransactionEvent) -> Self {
-        TransactionState {
-            tx_event,
-            transaction: Withdrawal {},
-        }
+    fn try_dispute(self: Box<Self>) -> Result<Box<dyn Disputable>, TxEventError> {
+        Ok(Box::new(TransactionState {
+            tx_event: self.tx_event,
+            transaction: Dispute {},
+        }))
+    }
+
+    fn id(&self) -> u32 {
+        self.tx_event.id
     }
 }
 
@@ -89,34 +103,28 @@ impl Transactable for TransactionState<Withdrawal> {
     fn client(&self) -> u16 {
         self.tx_event.client
     }
+
+    fn id(&self) -> u32 {
+        self.tx_event.id
+    }
 }
 
-impl TransactionState<Dispute> {
-    pub fn new(tx_event: TransactionEvent) -> Result<Self, TxEventError> {
-        if let TransactionEventType::Deposit = tx_event.r#type {
-            Ok(TransactionState {
-                tx_event,
-                transaction: Dispute {},
-            })
-        } else {
-            Err(TxEventError::UnexpectedTxType {
-                expected: TransactionEventType::Dispute,
-                actual: tx_event.r#type,
-            })
-        }
-    }
-    pub fn resolve(self) -> TransactionState<Resolve> {
-        TransactionState {
+impl Disputable for TransactionState<Dispute> {
+    fn resolve(self: Box<Self>) -> Box<dyn Transactable> {
+        Box::new(TransactionState {
             tx_event: self.tx_event,
             transaction: Resolve {},
-        }
+        })
     }
 
-    pub fn chargeback(self) -> TransactionState<Chargeback> {
-        TransactionState {
+    fn chargeback(self: Box<Self>) -> Box<dyn Transactable> {
+        Box::new(TransactionState {
             tx_event: self.tx_event,
             transaction: Chargeback {},
-        }
+        })
+    }
+    fn cloned(&self) -> Box<dyn Disputable> {
+        Box::new(self.clone())
     }
 }
 
@@ -127,14 +135,23 @@ impl Transactable for TransactionState<Dispute> {
     fn client(&self) -> u16 {
         self.tx_event.client
     }
+
+    fn id(&self) -> u32 {
+        self.tx_event.id
+    }
 }
 
 impl Transactable for TransactionState<Resolve> {
     fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
         account.free(self)
     }
+
     fn client(&self) -> u16 {
         self.tx_event.client
+    }
+
+    fn id(&self) -> u32 {
+        self.tx_event.id
     }
 }
 
@@ -142,7 +159,12 @@ impl Transactable for TransactionState<Chargeback> {
     fn apply(&self, account: &mut Account) -> Result<(), AccountError> {
         account.chargeback(self)
     }
+
     fn client(&self) -> u16 {
         self.tx_event.client
+    }
+
+    fn id(&self) -> u32 {
+        self.tx_event.id
     }
 }
