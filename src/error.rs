@@ -1,75 +1,112 @@
 use std::error::Error;
 use std::fmt::Display;
 
-use crate::transaction::TransactionEventType;
+use crate::transaction::{TransactionEvent, TransactionEventType};
 
 #[derive(Debug)]
-pub enum AccountError {
-    InsufficientFunds { id: u16, tx: u32 },
-    InsufficientHold { id: u16, tx: u32 },
-    ExpectedAmountError { id: u16, tx: u32 },
-    AccountFrozen { id: u16, tx: u32 },
+pub enum AccountTxError {
+    InsufficientAvailableBalanceError { id: u16 },
+    InsufficientHoldBalanceError { id: u16 },
+    AccountFrozenError { id: u16 },
 }
 
-impl Error for AccountError {
+impl Error for AccountTxError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            AccountError::InsufficientFunds { .. } => None,
-            AccountError::InsufficientHold { .. } => None,
-            AccountError::ExpectedAmountError { .. } => None,
-            AccountError::AccountFrozen { .. } => None,
+            AccountTxError::InsufficientAvailableBalanceError { .. } => None,
+            AccountTxError::InsufficientHoldBalanceError { .. } => None,
+            AccountTxError::AccountFrozenError { .. } => None,
         }
     }
 }
 
-impl Display for AccountError {
+impl Display for AccountTxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AccountError::InsufficientFunds { id, tx } => {
-                write!(f, "InsufficientFunds in account: '{id}', tx: '{tx}'")
-            }
-            AccountError::InsufficientHold { id, tx } => {
-                write!(f, "InsufficientHold in account: '{id}', tx: '{tx}'")
-            }
-            AccountError::ExpectedAmountError { id, tx } => {
-                write!(
-                    f,
-                    "ExpectedAmountError: '{id}', tx: '{tx}', expected tx amount"
-                )
-            }
-            AccountError::AccountFrozen { id, tx } => {
-                write!(f, "AccountFrozen: '{id}', tx: '{tx}', expected tx amount")
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum TxEventError {
-    UnexpectedTxType { actual: TransactionEventType },
-    NotDisputable,
-}
-
-impl Error for TxEventError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            TxEventError::UnexpectedTxType { .. } => None,
-            TxEventError::NotDisputable => None,
-        }
-    }
-}
-
-impl Display for TxEventError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TxEventError::UnexpectedTxType { actual } => write!(
+            AccountTxError::InsufficientAvailableBalanceError { id } => write!(
                 f,
-                "UnexpectedTxType: expected: '{:?}|{:?}', actual: '{actual:?}'",
+                "InsufficientAvailableBalanceError: Insufficient funds to complete the transaction for account: '{id}'"
+            ),
+            AccountTxError::InsufficientHoldBalanceError { id } => write!(
+                f,
+                "InsufficientHeldBalanceError: Insufficient funds to complete the transaction for account '{id}'"
+            ),
+            AccountTxError::AccountFrozenError { id } => write!(
+                f,
+                "AccountFrozenError: Account frozen, cannot complete the transaction for account: {id}"
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum EventTxError {
+    UnexpectedTxTypeError { actual: TransactionEventType },
+    NotDisputableError,
+    ExpectedAmountError,
+}
+
+impl Error for EventTxError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            EventTxError::UnexpectedTxTypeError { .. } => None,
+            EventTxError::NotDisputableError => None,
+            EventTxError::ExpectedAmountError => None,
+        }
+    }
+}
+
+impl Display for EventTxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventTxError::UnexpectedTxTypeError { actual } => write!(
+                f,
+                "UnexpectedTxTypeError: expected: '{:?}|{:?}', actual: '{actual:?}'",
                 TransactionEventType::Deposit,
                 TransactionEventType::Withdrawal,
             ),
-            TxEventError::NotDisputable => {
-                write!(f, "NotDisputable: cannot dispute transaction type")
+            EventTxError::NotDisputableError => {
+                write!(f, "NotDisputableError: cannot dispute transaction type")
+            }
+            EventTxError::ExpectedAmountError => {
+                write!(
+                    f,
+                    "ExpectedAmountError: expected transaction amount field to be Some"
+                )
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TransactionError {
+    AccountTransactionError { tx: u32, source: AccountTxError },
+    TransactionEventError { tx: u32, source: EventTxError },
+}
+
+impl TransactionError {
+    pub fn from_event_error(tx: TransactionEvent, err: EventTxError) -> Self {
+        TransactionError::TransactionEventError { tx: tx.id, source: err }
+    }
+}
+
+impl Error for TransactionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            TransactionError::AccountTransactionError { source, .. } => Some(source),
+            TransactionError::TransactionEventError { source, .. } => Some(source),
+        }
+    }
+}
+
+impl Display for TransactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransactionError::AccountTransactionError { tx, .. } => {
+                write!(f, "AccountTransactionError: transaction: '{tx}'")
+            }
+            TransactionError::TransactionEventError { tx, .. } => {
+                write!(f, "TransactionEventError: transaction: '{tx}'")
             }
         }
     }
