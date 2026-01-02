@@ -3,14 +3,11 @@ use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{RwLock, RwLockWriteGuard};
 use tokio::task::JoinHandle;
 
-use crate::{
-    error::AccountError,
-    transaction::{
-        Chargeback, Deposit, Dispute, Resolve, Transactable, TransactionState, Withdrawal,
-    },
-};
+use crate::error::AccountTxError;
+use crate::transaction::Transactable;
 
 #[derive(Default, Clone, Copy)]
 pub enum AccountStatus {
@@ -19,12 +16,73 @@ pub enum AccountStatus {
     Locked,
 }
 
-#[derive(Default)]
-pub struct Account {
-    id: u16,
+#[derive(Default, Clone, Copy)]
+pub struct AccountState {
     available: f64,
     held: f64,
     status: AccountStatus,
+}
+
+pub struct AccountTx<'a> {
+    id: u16,
+    lock: RwLockWriteGuard<'a, AccountState>,
+    state: AccountState,
+}
+
+pub enum AccountOp {
+    Add(f64),
+    Sub(f64),
+}
+
+impl AccountOp {
+    pub fn apply(self, num: f64) -> f64 {
+        match self {
+            AccountOp::Add(op_num) => num + op_num,
+            AccountOp::Sub(op_num) => num - op_num,
+        }
+    }
+}
+
+impl<'a> AccountTx<'a> {
+    pub fn available(&mut self, op: AccountOp) {
+        self.state.available = op.apply(self.state.available);
+    }
+
+    pub fn held(&mut self, op: AccountOp) {
+        self.state.held = op.apply(self.state.held);
+    }
+
+    pub fn lock(&mut self) {
+        self.state.status = AccountStatus::Locked;
+    }
+
+    fn verify(&self) -> Result<(), AccountTxError> {
+        if let AccountStatus::Locked = self.lock.status {
+            return Err(AccountTxError::AccountFrozenError { id: self.id });
+        }
+
+        if self.state.available < 0.0 {
+            return Err(AccountTxError::InsufficientAvailableBalanceError { id: self.id });
+        }
+
+        if self.state.held < 0.0 {
+            return Err(AccountTxError::InsufficientHoldBalanceError { id: self.id });
+        }
+
+        Ok(())
+    }
+
+    pub fn apply(mut self) -> Result<(), AccountTxError> {
+        self.verify()?;
+        *self.lock = self.state;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct Account {
+    id: u16,
+    state: RwLock<AccountState>,
 }
 
 impl Account {
@@ -35,139 +93,14 @@ impl Account {
         }
     }
 
-    pub fn deposit(&mut self, tx: &TransactionState<Deposit>) -> Result<(), AccountError> {
-        if let AccountStatus::Locked = self.status {
-            return Err(AccountError::AccountFrozen {
-                id: self.id,
-                tx: tx.tx_event.id,
-            });
+    pub async fn tx(&self) -> AccountTx<'_> {
+        let lock = self.state.write().await;
+        let state = *lock;
+        AccountTx {
+            id: self.id,
+            lock,
+            state,
         }
-        let amount = tx
-            .tx_event
-            .amount
-            .ok_or(AccountError::ExpectedAmountError {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })?;
-
-        self.available += amount;
-        Ok(())
-    }
-
-    pub fn debit(&mut self, tx: &TransactionState<Withdrawal>) -> Result<(), AccountError> {
-        if let AccountStatus::Locked = self.status {
-            return Err(AccountError::AccountFrozen {
-                id: self.id,
-                tx: tx.tx_event.id,
-            });
-        }
-        let amount = tx
-            .tx_event
-            .amount
-            .ok_or(AccountError::ExpectedAmountError {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })?;
-
-        if 0.0 <= self.available - amount {
-            self.available -= amount;
-            Ok(())
-        } else {
-            Err(AccountError::InsufficientFunds {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })
-        }
-    }
-
-    pub fn hold(&mut self, tx: &TransactionState<Dispute>) -> Result<(), AccountError> {
-        if let AccountStatus::Locked = self.status {
-            return Err(AccountError::AccountFrozen {
-                id: self.id,
-                tx: tx.tx_event.id,
-            });
-        }
-        let amount = tx
-            .tx_event
-            .amount
-            .ok_or(AccountError::ExpectedAmountError {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })?;
-
-        if 0.0 <= self.available - amount {
-            self.available -= amount;
-            self.held += amount;
-            Ok(())
-        } else {
-            Err(AccountError::InsufficientFunds {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })
-        }
-    }
-
-    // @todo: duped and dirty, clean this up
-    pub fn free(&mut self, tx: &TransactionState<Resolve>) -> Result<(), AccountError> {
-        if let AccountStatus::Locked = self.status {
-            return Err(AccountError::AccountFrozen {
-                id: self.id,
-                tx: tx.tx_event.id,
-            });
-        }
-        let amount = tx
-            .tx_event
-            .amount
-            .ok_or(AccountError::ExpectedAmountError {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })?;
-
-        if 0.0 <= self.held - amount {
-            self.held -= amount;
-            self.available += amount;
-            Ok(())
-        } else {
-            Err(AccountError::InsufficientHold {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })
-        }
-    }
-
-    pub fn chargeback(&mut self, tx: &TransactionState<Chargeback>) -> Result<(), AccountError> {
-        if let AccountStatus::Locked = self.status {
-            return Err(AccountError::AccountFrozen {
-                id: self.id,
-                tx: tx.tx_event.id,
-            });
-        }
-        let amount = tx
-            .tx_event
-            .amount
-            .ok_or(AccountError::ExpectedAmountError {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })?;
-
-        if 0.0 <= self.held - amount {
-            self.held -= amount;
-            self.lock();
-            Ok(())
-        } else {
-            Err(AccountError::InsufficientHold {
-                id: self.id,
-                tx: tx.tx_event.id,
-            })
-        }
-    }
-
-    fn set_status(&mut self, status: AccountStatus) {
-        self.status = status;
-    }
-
-    pub fn lock(&mut self) {
-        self.set_status(AccountStatus::Locked)
     }
 }
 
@@ -210,14 +143,15 @@ impl Display for Accounts {
         write!(f, "client,available,held,total,locked")?;
 
         self.0.values().try_for_each(|account| {
+            let state = account.state.try_read().unwrap();
             write!(
                 f,
                 "\n{},{},{},{},{}",
                 account.id,
-                format_f64(account.available),
-                format_f64(account.held),
-                format_f64(account.available + account.held),
-                matches!(account.status, AccountStatus::Locked)
+                format_f64(state.available),
+                format_f64(state.held),
+                format_f64(state.available + state.held),
+                matches!(state.status, AccountStatus::Locked)
             )
         })
     }
@@ -246,7 +180,8 @@ impl AccountProcessor {
                 let account = accounts
                     .entry(tx.client())
                     .or_insert_with(|| Account::new(tx.client()));
-                let _ = tx.apply(account).inspect_err(|err| eprintln!("{err}"));
+                let account_tx = account.tx().await;
+                let _ = tx.apply(account_tx).inspect_err(|err| eprintln!("{err}"));
             }
             accounts
         })
